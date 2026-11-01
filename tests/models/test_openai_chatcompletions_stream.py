@@ -47,6 +47,7 @@ from agents.models.chatcmpl_stream_handler import (
     _merge_buffered_metadata,
     _StreamOutputLayout,
 )
+from agents.models.fake_id import FAKE_RESPONSES_ID
 from agents.models.interface import ModelTracing
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.models.openai_provider import OpenAIProvider
@@ -4048,6 +4049,65 @@ async def test_stream_response_propagates_request_id(monkeypatch) -> None:
 
     assert completed is not None
     assert getattr(completed.response, "_request_id", None) == "req_streamed_456"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_run_streamed_reports_none_response_id_for_chat_completions(
+    monkeypatch,
+) -> None:
+    """Streamed Chat Completions turns must report a ``None`` response id.
+
+    The streaming path builds a placeholder ``Response`` whose id is
+    ``FAKE_RESPONSES_ID``. The runner normalizes it to ``None`` so
+    ``last_response_id`` matches the non-streamed path and the placeholder never
+    leaks into ``previous_response_id`` chains or compaction requests.
+    """
+    chunk1 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(content="Hello"))],
+    )
+    chunk2 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(content=" world"))],
+        usage=CompletionUsage(completion_tokens=2, prompt_tokens=3, total_tokens=5),
+    )
+
+    async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
+        for c in (chunk1, chunk2):
+            yield c
+        yield _chunk_with([Choice(index=0, delta=ChoiceDelta(), finish_reason="stop")])
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        # Mirror production: the streaming skeleton Response carries the fake id.
+        resp = Response(
+            id=FAKE_RESPONSES_ID,
+            created_at=0,
+            model="fake-model",
+            object="response",
+            output=[],
+            tool_choice="none",
+            tools=[],
+            parallel_tool_calls=False,
+        )
+        return resp, fake_stream()
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+
+    result = Runner.run_streamed(Agent(name="test", model=model), "hi")
+    async for _event in result.stream_events():
+        pass
+
+    assert result.final_output == "Hello world"
+    assert result.last_response_id is None
+    assert result.raw_responses[0].response_id is None
 
 
 @pytest.mark.allow_call_model_methods
