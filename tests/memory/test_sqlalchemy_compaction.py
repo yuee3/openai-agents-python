@@ -176,7 +176,8 @@ async def test_encrypted_prefix_cleanup_is_atomic(
     assert "expired" not in str(client.responses.compact.call_args.kwargs)
 
 
-async def test_replacement_uses_timestamp_order_not_id_order(backend) -> None:
+async def test_replacement_uses_id_order_not_created_at_order(backend) -> None:
+    """A backdated created_at must not shield a newer row from tail compaction (#5459)."""
     visible: list[TResponseInputItem] = [
         {"role": "user", "content": f"visible {i}"} for i in range(20)
     ]
@@ -203,7 +204,10 @@ async def test_replacement_uses_timestamp_order_not_id_order(backend) -> None:
         "continue",
         session=session,
     )
-    assert await backend.get_items(limit=100) == [hidden, summary]
+    # Ordering follows the id sequence: the retained row outside the compaction
+    # window is the first-appended item, while the appended-last row (despite its
+    # backdated created_at) is part of the replaced suffix.
+    assert await backend.get_items(limit=100) == [visible[0], summary]
 
 
 async def test_cancelled_replacement_settles_before_other_instance_append(

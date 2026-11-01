@@ -1045,8 +1045,59 @@ async def test_pop_item_same_timestamp_returns_latest():
     assert _item_ids(remaining) == ["rs_pop_same_ts"]
 
 
-async def test_get_items_orders_by_id_for_ties():
-    """Test that get_items adds id ordering to break timestamp ties."""
+async def test_backdated_timestamps_do_not_reorder_history():
+    """Regression test for #5459: history follows the primary key, not created_at.
+
+    PostgreSQL's CURRENT_TIMESTAMP is the transaction start wall clock, so rows
+    appended later can receive earlier created_at values (different TimeZone
+    settings per connection, or a DST fall-back). Ordering must follow the id
+    sequence, like the SQLite backends.
+    """
+    session_id = "backdated_timestamp_test"
+    session = SQLAlchemySession.from_url(session_id, url=DB_URL, create_tables=True)
+
+    await session.add_items([_make_message_item("msg_first", "turn 1")])
+    await session.add_items([_make_message_item("msg_second", "turn 2")])
+    await session.add_items([_make_message_item("msg_third", "turn 3")])
+
+    # Backdate created_at so the stored timestamps run backwards across appends.
+    async with session._session_factory() as sess:
+        rows = await sess.execute(
+            select(session._messages.c.id, session._messages.c.message_data).where(
+                session._messages.c.session_id == session.session_id
+            )
+        )
+        id_map = {
+            json.loads(message_json)["id"]: row_id for row_id, message_json in rows.fetchall()
+        }
+        await sess.execute(
+            update(session._messages)
+            .where(session._messages.c.id == id_map["msg_second"])
+            .values(created_at=datetime(2025, 10, 15, 17, 0, 0))
+        )
+        await sess.execute(
+            update(session._messages)
+            .where(session._messages.c.id == id_map["msg_third"])
+            .values(created_at=datetime(2025, 10, 15, 16, 0, 0))
+        )
+        await sess.commit()
+
+    retrieved = await session.get_items()
+    assert _item_ids(retrieved) == ["msg_first", "msg_second", "msg_third"]
+
+    latest = await session.get_items(limit=1)
+    assert _item_ids(latest) == ["msg_third"]
+
+    popped = await session.pop_item()
+    assert popped is not None
+    assert cast(dict[str, Any], popped)["id"] == "msg_third"
+
+    remaining = await session.get_items()
+    assert _item_ids(remaining) == ["msg_first", "msg_second"]
+
+
+async def test_get_items_orders_by_id():
+    """Test that get_items orders by the primary key id."""
     session_id = "order_by_id_test"
     session = SQLAlchemySession.from_url(session_id, url=DB_URL, create_tables=True)
 
@@ -1084,16 +1135,10 @@ async def test_get_items_orders_by_id_for_ties():
 
     assert len(recorded) >= 2
     orderings_full = [str(clause) for clause in recorded[0]._order_by_clause]
-    assert orderings_full == [
-        "agent_messages.created_at ASC",
-        "agent_messages.id ASC",
-    ]
+    assert orderings_full == ["agent_messages.id ASC"]
 
     orderings_limited = [str(clause) for clause in recorded[1]._order_by_clause]
-    assert orderings_limited == [
-        "agent_messages.created_at DESC",
-        "agent_messages.id DESC",
-    ]
+    assert orderings_limited == ["agent_messages.id DESC"]
 
     assert _item_ids(retrieved_full) == ["rs_first", "msg_second"]
     assert _item_ids(retrieved_limited) == ["rs_first", "msg_second"]
