@@ -43,12 +43,14 @@ from openai.types.responses import (
     ResponseOutputMessage,
     ResponseOutputRefusal,
     ResponseOutputText,
+    ToolChoiceFunction,
 )
 from openai.types.responses.response_input_item_param import FunctionCallOutput
 
 from agents.agent_output import AgentOutputSchema
 from agents.exceptions import AgentsException, UserError
 from agents.items import TResponseInputItem
+from agents.model_settings import MCPToolChoice
 from agents.models.chatcmpl_converter import Converter
 from agents.models.fake_id import FAKE_RESPONSES_ID
 
@@ -566,6 +568,31 @@ def test_convert_tool_choice_allows_tool_search_as_named_function_for_chat_model
     assert isinstance(tool_choice_dict, dict)
     assert tool_choice_dict["type"] == "function"
     assert tool_choice_dict["function"]["name"] == "tool_search"
+
+
+def test_convert_tool_choice_for_response_passes_through_standard_options() -> None:
+    assert Converter.convert_tool_choice_for_response(None) == "auto"
+    assert Converter.convert_tool_choice_for_response("auto") == "auto"
+    assert Converter.convert_tool_choice_for_response("required") == "required"
+    assert Converter.convert_tool_choice_for_response("none") == "none"
+
+
+def test_convert_tool_choice_for_response_keeps_function_names() -> None:
+    """
+    The placeholder Response built for streamed Chat Completions must not turn
+    function names into hosted tool selectors: {"type": "web_search"} and
+    {"type": "mcp"} fail Response validation (issue #5447).
+    """
+    for name in ("mytool", "web_search", "mcp"):
+        assert Converter.convert_tool_choice_for_response(name) == ToolChoiceFunction(
+            type="function", name=name
+        )
+    # MCPToolChoice is rejected for Chat Completions before the request is sent;
+    # the helper still falls back to "auto" for it defensively.
+    assert (
+        Converter.convert_tool_choice_for_response(MCPToolChoice(server_label="srv", name="tool"))
+        == "auto"
+    )
 
 
 def test_convert_response_format_returns_not_given_for_plain_text_and_dict_for_schemas() -> None:

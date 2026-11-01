@@ -29,6 +29,7 @@ from openai.types.responses import (
     ResponseCompletedEvent,
     ResponseOutputMessage,
     ResponseOutputRefusal,
+    ToolChoiceFunction,
 )
 from openai.types.responses.response import IncompleteDetails
 from openai.types.responses.response_created_event import ResponseCreatedEvent
@@ -56,6 +57,7 @@ from agents import (
     TResponseInputItem,
     __version__,
     function_tool,
+    generation_span,
     handoff,
     trace,
 )
@@ -2513,3 +2515,41 @@ async def test_any_llm_responses_stream_with_usage_is_not_marked(monkeypatch) ->
     assert isinstance(terminal, ResponseCompletedEvent)
     assert terminal.response.usage is not None
     assert _requests_for_response_without_usage(terminal.response) == 0
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_chat_stream_placeholder_allows_function_named_tool_choice(
+    monkeypatch,
+) -> None:
+    """
+    A function tool named like a hosted tool (e.g. `mcp`) must not break the
+    placeholder Response built for streaming:
+    https://github.com/openai/openai-agents-python/issues/5447
+    """
+    provider = FakeAnyLLMProvider(supports_responses=False, chat_response=_empty_chat_stream())
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+    AnyLLMModel = module.AnyLLMModel
+
+    model = AnyLLMModel(model="openrouter/openai/gpt-5.4-mini")
+    with generation_span(disabled=True) as span:
+        response, stream = await model._fetch_chat_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(tool_choice="mcp"),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            span=span,
+            tracing=ModelTracing.DISABLED,
+            stream=True,
+            prompt=None,
+        )
+
+    assert provider.chat_calls[0]["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "mcp"},
+    }
+    assert isinstance(response, Response)
+    assert response.tool_choice == ToolChoiceFunction(type="function", name="mcp")
+    assert hasattr(stream, "__aiter__")

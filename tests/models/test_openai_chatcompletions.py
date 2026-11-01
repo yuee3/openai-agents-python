@@ -34,6 +34,7 @@ from openai.types.responses import (
     ResponseOutputMessage,
     ResponseOutputRefusal,
     ResponseOutputText,
+    ToolChoiceFunction,
 )
 from openai.types.shared import Reasoning
 
@@ -1658,6 +1659,65 @@ async def test_fetch_response_stream(monkeypatch) -> None:
     assert response.object == "response"
     assert response.output == []
     # We returned the async iterator produced by our dummy.
+    assert hasattr(stream, "__aiter__")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tool_choice_name",
+    ["web_search", "mcp"],
+    ids=["web_search", "mcp"],
+)
+async def test_fetch_response_stream_function_name_tool_choice(tool_choice_name: str) -> None:
+    """
+    When `tool_choice` names a function tool that collides with a hosted tool name
+    (e.g. `web_search` or `mcp`), the placeholder Response built for streaming must
+    carry a function selector. Hosted selectors like {"type": "web_search"} or
+    {"type": "mcp"} fail Response validation and would crash `Runner.run_streamed`
+    before any stream event is emitted.
+    See https://github.com/openai/openai-agents-python/issues/5447
+    """
+
+    async def event_stream() -> AsyncIterator[ChatCompletionChunk]:
+        if False:  # pragma: no cover
+            yield  # pragma: no cover
+
+    class DummyCompletions:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, Any] = {}
+
+        async def create(self, **kwargs: Any) -> Any:
+            self.kwargs = kwargs
+            return event_stream()
+
+    class DummyClient:
+        def __init__(self, completions: DummyCompletions) -> None:
+            self.chat = type("_Chat", (), {"completions": completions})()
+            self.base_url = httpx2.URL("http://fake")
+
+    completions = DummyCompletions()
+    dummy_client = DummyClient(completions)
+    model = OpenAIChatCompletionsModel(model="gpt-4", openai_client=dummy_client)  # type: ignore
+    with generation_span(disabled=True) as span:
+        response, stream = await model._fetch_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(tool_choice=tool_choice_name),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            span=span,
+            tracing=ModelTracing.DISABLED,
+            stream=True,
+        )
+    # The request itself carries the Chat Completions function selector.
+    assert completions.kwargs["tool_choice"] == {
+        "type": "function",
+        "function": {"name": tool_choice_name},
+    }
+    # The placeholder Response mirrors it instead of a hosted tool selector.
+    assert isinstance(response, Response)
+    assert response.tool_choice == ToolChoiceFunction(type="function", name=tool_choice_name)
     assert hasattr(stream, "__aiter__")
 
 

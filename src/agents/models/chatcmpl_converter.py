@@ -40,6 +40,7 @@ from openai.types.responses import (
     ResponseOutputText,
     ResponseReasoningItem,
     ResponseReasoningItemParam,
+    ToolChoiceFunction,
 )
 from openai.types.responses.response_input_param import FunctionCallOutput, ItemReference, Message
 from openai.types.responses.response_output_text import (
@@ -102,6 +103,24 @@ class Converter:
                     "name": tool_choice,
                 },
             }
+
+    @classmethod
+    def convert_tool_choice_for_response(
+        cls, tool_choice: Literal["auto", "required", "none"] | str | MCPToolChoice | None
+    ) -> Literal["auto", "required", "none"] | ToolChoiceFunction:
+        """Tool choice for the placeholder Response built for streamed Chat Completions.
+
+        Chat Completions has no hosted tools, so any other string is a function name,
+        matching what convert_tool_choice() sends in the request. Hosted tool selectors
+        such as {"type": "web_search"} fail validation on the placeholder Response
+        (issue #5447). None falls back to "auto" for Responses API data compatibility
+        (issue #980).
+        """
+        if tool_choice in ("auto", "required", "none"):
+            return cast(Literal["auto", "required", "none"], tool_choice)
+        if isinstance(tool_choice, str):
+            return ToolChoiceFunction(type="function", name=tool_choice)
+        return "auto"
 
     @classmethod
     def convert_response_format(

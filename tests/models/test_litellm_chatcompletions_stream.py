@@ -2,6 +2,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
+import litellm
 import pytest
 from openai.types.chat.chat_completion_chunk import (
     ChatCompletionChunk,
@@ -25,6 +26,7 @@ from openai.types.responses import (
     ResponseOutputText,
     ResponseReasoningItem,
     ResponseRefusalDeltaEvent,
+    ToolChoiceFunction,
 )
 
 from agents.extensions.models.litellm_model import LitellmModel
@@ -32,7 +34,7 @@ from agents.extensions.models.litellm_provider import LitellmProvider
 from agents.items import TResponseStreamEvent
 from agents.model_settings import ModelSettings
 from agents.models.interface import Model, ModelTracing
-from agents.tracing import get_current_span, trace
+from agents.tracing import generation_span, get_current_span, trace
 
 
 @pytest.mark.allow_call_model_methods
@@ -1092,3 +1094,47 @@ async def test_stream_response_lets_in_flight_close_finish_after_cancellation(
     finally:
         release.set()
         task.cancel()
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_fetch_response_stream_placeholder_allows_function_named_tool_choice(
+    monkeypatch,
+) -> None:
+    """
+    A function tool named like a hosted tool (e.g. `web_search`) must not break the
+    placeholder Response built for streaming:
+    https://github.com/openai/openai-agents-python/issues/5447
+    """
+    captured: dict[str, object] = {}
+
+    async def fake_chunk_stream() -> AsyncIterator[ChatCompletionChunk]:
+        if False:  # pragma: no cover
+            yield  # pragma: no cover
+
+    async def fake_acompletion(model, messages=None, **kwargs):
+        captured.update(kwargs)
+        return fake_chunk_stream()
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    model = LitellmModel(model="test-model")
+    with generation_span(disabled=True) as span:
+        response, stream = await model._fetch_response(
+            system_instructions=None,
+            input=[],
+            model_settings=ModelSettings(tool_choice="web_search"),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            span=span,
+            tracing=ModelTracing.DISABLED,
+            stream=True,
+        )
+
+    assert captured["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "web_search"},
+    }
+    assert isinstance(response, Response)
+    assert response.tool_choice == ToolChoiceFunction(type="function", name="web_search")
+    assert hasattr(stream, "__aiter__")
